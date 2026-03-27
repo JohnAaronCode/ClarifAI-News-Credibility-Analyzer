@@ -254,21 +254,21 @@ function HistoryTab() {
             className="bg-green-50 dark:bg-green-950 p-4 rounded-lg hover:shadow-md transition-shadow cursor-pointer"
           >
             <div className="text-3xl font-bold text-green-600">{stats.real}</div>
-            <div className="text-sm text-muted-foreground">High Credibility</div>
+            <div className="text-sm text-muted-foreground">Credible</div>
           </button>
           <button
             onClick={() => setStatsModalOpen(true)}
             className="bg-red-50 dark:bg-red-950 p-4 rounded-lg hover:shadow-md transition-shadow cursor-pointer"
           >
             <div className="text-3xl font-bold text-red-600">{stats.fake}</div>
-            <div className="text-sm text-muted-foreground">Low Credibility</div>
+            <div className="text-sm text-muted-foreground">Likely False</div>
           </button>
           <button
             onClick={() => setStatsModalOpen(true)}
             className="bg-yellow-50 dark:bg-yellow-950 p-4 rounded-lg hover:shadow-md transition-shadow cursor-pointer"
           >
             <div className="text-3xl font-bold text-yellow-600">{stats.unverified}</div>
-            <div className="text-sm text-muted-foreground">Moderate Credibility</div>
+            <div className="text-sm text-muted-foreground">Unverified</div>
           </button>
         </div>
       </Card>

@@ -47,7 +47,7 @@ export default function HistoryStatsModal({ isOpen, onClose, stats }: HistorySta
 
   const verdictStats = [
     {
-      label: "High Credibility",
+      label: "Credible",
       verdict: "REAL",
       count: stats.real,
       color: "bg-green-100 dark:bg-green-900/30",
@@ -55,7 +55,7 @@ export default function HistoryStatsModal({ isOpen, onClose, stats }: HistorySta
       borderColor: "border-green-200 dark:border-green-800",
     },
     {
-      label: "Low Credibility",
+      label: "Likely False",
       verdict: "FAKE",
       count: stats.fake,
       color: "bg-red-100 dark:bg-red-900/30",
@@ -63,7 +63,7 @@ export default function HistoryStatsModal({ isOpen, onClose, stats }: HistorySta
       borderColor: "border-red-200 dark:border-red-800",
     },
     {
-      label: "Moderate Credibility",
+      label: "Unverified",
       verdict: "UNVERIFIED",
       count: stats.unverified,
       color: "bg-yellow-100 dark:bg-yellow-900/30",
