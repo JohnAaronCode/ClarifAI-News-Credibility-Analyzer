@@ -127,7 +127,7 @@ export default function Navbar() {
               ClarifAI
             </div>
             <div style={{ fontSize: 10, fontWeight: 500, color: isDark ? "#475569" : "#94a3b8", marginTop: 1, letterSpacing: "0.04em", textTransform: "uppercase" }}>
-              Credibility Analyzer
+              News Credibility Analyzer
             </div>
           </div>
         </Link>

@@ -10,6 +10,7 @@ export async function POST(request: NextRequest) {
     }
 
     let processedContent = content
+    let extractedTitle: string | undefined = undefined
 
     if (type === "url") {
       try {
@@ -29,7 +30,9 @@ export async function POST(request: NextRequest) {
         }
         const html = await response.text()
         processedContent = extractTextFromHTML(html)
+        extractedTitle = extractTitleFromHTML(html) || undefined
         console.log("[v0] Extracted URL content length:", processedContent.length)
+        console.log("[v0] Extracted title:", extractedTitle)
 
         if (processedContent.length < 30) {
           return NextResponse.json({
@@ -65,13 +68,64 @@ export async function POST(request: NextRequest) {
       return NextResponse.json(cached)
     }
 
-    const analysis = await analyzeContentWithDualEngine(processedContent, type, fileName, content)
+    const analysis = await analyzeContentWithDualEngine(processedContent, type, fileName, content, extractedTitle)
     analysisCache.set(cacheKey, analysis)
     return NextResponse.json(analysis)
   } catch (error) {
     console.error("Analysis error:", error)
     return NextResponse.json({ error: "Analysis failed" }, { status: 500 })
   }
+}
+
+// ── Shared HTML entity decoder ────────────────────────────────────────────
+function decodeHTMLEntities(text: string): string {
+  return text
+    .replace(/<[^>]+>/g, "")
+    // Numeric decimal entities — covers WordPress curly quotes like &#8216; &#8217; &#8220; &#8221;
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(Number(dec)))
+    // Numeric hex entities like &#x2019;
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    // Named entities
+    .replace(/&amp;/g, "&")
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&ldquo;/g, "\u201C")
+    .replace(/&rdquo;/g, "\u201D")
+    .replace(/&lsquo;/g, "\u2018")
+    .replace(/&rsquo;/g, "\u2019")
+    .replace(/&mdash;/g, "\u2014")
+    .replace(/&ndash;/g, "\u2013")
+    .trim()
+}
+
+function extractTitleFromHTML(html: string): string {
+  // 1st priority: <h1> — most accurate headline on news sites
+  const h1Match = html.match(/<h1[^>]*>([\s\S]*?)<\/h1>/i)
+  if (h1Match) {
+    const decoded = decodeHTMLEntities(h1Match[1])
+    if (decoded.length > 10) return decoded
+  }
+
+  // 2nd priority: og:title meta — complete headline without site-name suffix
+  const ogTitleMatch =
+    html.match(/<meta[^>]+property=["']og:title["'][^>]+content=["']([^"']+)["']/i) ||
+    html.match(/<meta[^>]+content=["']([^"']+)["'][^>]+property=["']og:title["']/i)
+  if (ogTitleMatch) {
+    const decoded = decodeHTMLEntities(ogTitleMatch[1])
+    if (decoded.length > 10) return decoded
+  }
+
+  // 3rd priority: <title> tag — strip site name suffix
+  const titleMatch = html.match(/<title[^>]*>([\s\S]*?)<\/title>/i)
+  if (titleMatch) {
+    return decodeHTMLEntities(titleMatch[1]).split(/\s[\|\-–—]\s/)[0].trim()
+  }
+
+  return ""
 }
 
 function extractTextFromHTML(html: string): string {
@@ -86,6 +140,9 @@ function extractTextFromHTML(html: string): string {
     .replace(/&gt;/g, ">")
     .replace(/&#39;/g, "'")
     .replace(/&nbsp;/g, " ")
+    // Decode numeric entities in body text too
+    .replace(/&#(\d+);/g, (_, dec) => String.fromCharCode(Number(dec)))
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
     .replace(/\s+/g, " ")
     .trim()
   return text
@@ -168,7 +225,6 @@ function validateContent(content: string, type: string): { isValid: boolean; mes
   return { isValid: true, message: "" }
 }
 
-// ── Build source search URL (fallback only) ────────────────────────────────
 function buildSourceSearchUrl(sourceDomain: string, query: string): string {
   const encoded = query.substring(0, 80).trim().split(/\s+/).map(encodeURIComponent).join("+")
   const searchUrlMap: Record<string, string> = {
@@ -198,7 +254,6 @@ function buildSourceSearchUrl(sourceDomain: string, query: string): string {
   return `https://news.google.com/search?q=${encoded}+site:${sourceDomain}`
 }
 
-// ── Extract content-based keywords for article search ─────────────────────
 function extractContentKeywords(content: string, maxKeywords = 6): string {
   const stopwords = new Set([
     "the","a","an","and","or","but","is","are","was","were","to","of","in",
@@ -214,16 +269,13 @@ function extractContentKeywords(content: string, maxKeywords = 6): string {
     "its","our","your","his","her","their","my","we","you","he","she","they",
     "i","me","him","us","them","what","which","who","whom","whose",
   ])
-
   const words = content
     .replace(/[^a-zA-Z0-9\s'-]/g, " ")
     .split(/\s+/)
     .map(w => w.toLowerCase().replace(/^['-]+|['-]+$/g, ""))
     .filter(w => w.length > 3 && !stopwords.has(w) && !/^\d+$/.test(w))
-
   const freq = new Map<string, number>()
   for (const w of words) freq.set(w, (freq.get(w) || 0) + 1)
-
   return Array.from(freq.entries())
     .sort((a, b) => b[1] - a[1])
     .slice(0, maxKeywords)
@@ -232,7 +284,6 @@ function extractContentKeywords(content: string, maxKeywords = 6): string {
     .trim()
 }
 
-// ── GNews API — fetch related articles by content keywords ─────────────────
 async function fetchFromGNews(
   query: string,
   excludeDomain: string | null,
@@ -241,54 +292,31 @@ async function fetchFromGNews(
   const cacheKey = makeQueryKey(query, "gnews")
   const cached = newsApiCache.get(cacheKey)
   if (cached) return cached
-
   try {
-    const q = encodeURIComponent(query.substring(0, 100))
+    const q = encodeURIComponent(query.replace(/[^\w\s]/g, " ").substring(0, 80).trim())
     const url = `https://gnews.io/api/v4/search?q=${q}&lang=en&max=10&apikey=${apiKey}`
     const res = await fetch(url, { signal: AbortSignal.timeout(7000) })
-    if (!res.ok) {
-      console.warn(`[GNews] HTTP ${res.status}`)
-      return []
-    }
+    if (!res.ok) { console.warn(`[GNews] HTTP ${res.status}`); return [] }
     const data = await res.json()
     const articles: any[] = data.articles ?? []
-
     const seen = new Set<string>()
     const results: Array<{ name: string; url: string; article_url: string; search_url: string; homepage_url: string }> = []
-
     for (const article of articles) {
       if (!article.url?.startsWith("http")) continue
       if (article.title === "[Removed]") continue
-
       let domain = ""
       try { domain = new URL(article.url).hostname.replace("www.", "") } catch { continue }
-
-      // Skip the source being analyzed itself
       if (excludeDomain && domain.includes(excludeDomain)) continue
       if (seen.has(domain)) continue
       seen.add(domain)
-
-      const sourceName = article.source?.name || domain
-      results.push({
-        name: sourceName,
-        url: article.url,
-        article_url: article.url,
-        search_url: article.url,
-        homepage_url: `https://${domain}`,
-      })
-
+      results.push({ name: article.source?.name || domain, url: article.url, article_url: article.url, search_url: article.url, homepage_url: `https://${domain}` })
       if (results.length >= 3) break
     }
-
     newsApiCache.set(cacheKey, results)
     return results
-  } catch (err) {
-    console.warn("[GNews] Error:", err)
-    return []
-  }
+  } catch (err) { console.warn("[GNews] Error:", err); return [] }
 }
 
-// ── Google Custom Search API ────────────────────────────────────────────────
 async function fetchFromGoogleSearch(
   query: string,
   excludeDomain: string | null,
@@ -298,52 +326,30 @@ async function fetchFromGoogleSearch(
   const cacheKey = makeQueryKey(query, "google")
   const cached = newsApiCache.get(cacheKey)
   if (cached) return cached
-
   try {
     const q = encodeURIComponent(query.substring(0, 100))
     const url = `https://www.googleapis.com/customsearch/v1?q=${q}&key=${apiKey}&cx=${cx}&num=10`
     const res = await fetch(url, { signal: AbortSignal.timeout(7000) })
-    if (!res.ok) {
-      console.warn(`[Google Search] HTTP ${res.status}`)
-      return []
-    }
+    if (!res.ok) { console.warn(`[Google Search] HTTP ${res.status}`); return [] }
     const data = await res.json()
     const items: any[] = data.items ?? []
-
     const seen = new Set<string>()
     const results: Array<{ name: string; url: string; article_url: string; search_url: string; homepage_url: string }> = []
-
     for (const item of items) {
       if (!item.link?.startsWith("http")) continue
-
       let domain = ""
       try { domain = new URL(item.link).hostname.replace("www.", "") } catch { continue }
-
       if (excludeDomain && domain.includes(excludeDomain)) continue
       if (seen.has(domain)) continue
       seen.add(domain)
-
-      const sourceName = item.displayLink?.replace("www.", "") || domain
-      results.push({
-        name: item.og?.site_name || sourceName,
-        url: item.link,
-        article_url: item.link,
-        search_url: item.link,
-        homepage_url: `https://${domain}`,
-      })
-
+      results.push({ name: item.og?.site_name || item.displayLink?.replace("www.", "") || domain, url: item.link, article_url: item.link, search_url: item.link, homepage_url: `https://${domain}` })
       if (results.length >= 3) break
     }
-
     newsApiCache.set(cacheKey, results)
     return results
-  } catch (err) {
-    console.warn("[Google Search] Error:", err)
-    return []
-  }
+  } catch (err) { console.warn("[Google Search] Error:", err); return [] }
 }
 
-// ── NewsAPI fallback ────────────────────────────────────────────────────────
 async function fetchFromNewsAPI(
   query: string,
   excludeDomain: string | null,
@@ -352,7 +358,6 @@ async function fetchFromNewsAPI(
   const cacheKey = makeQueryKey(query, "newsapi")
   const cached = newsApiCache.get(cacheKey)
   if (cached) return cached
-
   try {
     const q = query.substring(0, 100).trim().split(/\s+/).map(encodeURIComponent).join("+")
     const url = `https://newsapi.org/v2/everything?q=${q}&sortBy=relevancy&pageSize=10&language=en&apiKey=${apiKey}`
@@ -360,10 +365,8 @@ async function fetchFromNewsAPI(
     if (!res.ok) return []
     const data = await res.json()
     const articles: any[] = data.articles ?? []
-
     const seen = new Set<string>()
     const results: Array<{ name: string; url: string; article_url: string; search_url: string; homepage_url: string }> = []
-
     for (const article of articles) {
       if (!article.url?.startsWith("http")) continue
       if (article.title === "[Removed]" || article.url?.includes("removed")) continue
@@ -372,28 +375,14 @@ async function fetchFromNewsAPI(
       if (excludeDomain && domain.includes(excludeDomain)) continue
       if (seen.has(domain)) continue
       seen.add(domain)
-
-      results.push({
-        name: article.source?.name || domain,
-        url: article.url,
-        article_url: article.url,
-        search_url: article.url,
-        homepage_url: `https://${domain}`,
-      })
+      results.push({ name: article.source?.name || domain, url: article.url, article_url: article.url, search_url: article.url, homepage_url: `https://${domain}` })
       if (results.length >= 3) break
     }
-
     newsApiCache.set(cacheKey, results)
     return results
-  } catch (err) {
-    console.warn("[NewsAPI] Error:", err)
-    return []
-  }
+  } catch (err) { console.warn("[NewsAPI] Error:", err); return [] }
 }
 
-// ── Main related-sources finder ─────────────────────────────────────────────
-// KEY FIX: The article's own source is injected FIRST by the caller,
-// so this function only finds *other* related sources (max 2 additional).
 type SourceResult = { name: string; url: string; article_url?: string; search_url: string; homepage_url: string }
 
 async function findRelatedTrustedSources(
@@ -409,39 +398,20 @@ async function findRelatedTrustedSources(
 ): Promise<SourceResult[]> {
   const query = contentKeywords || searchQuery
   if (!query) return []
-
   console.log("[ClarifAI] Related sources query:", query)
-
-  // ── Path A: GNews ──────────────────────────────────────────────────────
   if (gNewsApiKey) {
     const results = await fetchFromGNews(query, excludeDomain, gNewsApiKey)
-    if (results.length >= 1) {
-      console.log(`[ClarifAI] GNews returned ${results.length} related articles`)
-      return results.slice(0, 2)
-    }
+    if (results.length >= 1) { console.log(`[ClarifAI] GNews returned ${results.length} related articles`); return results.slice(0, 2) }
   }
-
-  // ── Path B: Google Custom Search ───────────────────────────────────────
   if (googleSearchApiKey && googleSearchCx) {
     const results = await fetchFromGoogleSearch(query, excludeDomain, googleSearchApiKey, googleSearchCx)
-    if (results.length >= 1) {
-      console.log(`[ClarifAI] Google Search returned ${results.length} related articles`)
-      return results.slice(0, 2)
-    }
+    if (results.length >= 1) { console.log(`[ClarifAI] Google Search returned ${results.length} related articles`); return results.slice(0, 2) }
   }
-
-  // ── Path C: NewsAPI ────────────────────────────────────────────────────
   if (newsApiKey) {
     const results = await fetchFromNewsAPI(query, excludeDomain, newsApiKey)
-    if (results.length > 0) {
-      console.log(`[ClarifAI] NewsAPI returned ${results.length} related articles`)
-      return results.slice(0, 2)
-    }
+    if (results.length > 0) { console.log(`[ClarifAI] NewsAPI returned ${results.length} related articles`); return results.slice(0, 2) }
   }
-
-  // ── Path D: Topic-based search page links (last resort) ───────────────
   if (detectedTopics.length === 0) return []
-
   const topicMatched = ALL_SOURCES
     .filter((src) => {
       if (excludeDomain && src.domain.includes(excludeDomain)) return false
@@ -455,9 +425,7 @@ async function findRelatedTrustedSources(
     .filter((s) => s.overlap > 0)
     .sort((a, b) => b.score - a.score)
     .slice(0, 2)
-
   if (topicMatched.length === 0) return []
-
   return topicMatched.map(({ src }) => {
     const search_url = buildSourceSearchUrl(src.domain, searchQuery)
     return { name: src.name, url: search_url, article_url: undefined, search_url, homepage_url: src.url }
@@ -469,6 +437,7 @@ async function analyzeContentWithDualEngine(
   type: string,
   fileName?: string,
   originalInput?: string,
+  articleTitle?: string,
 ) {
   const openaiApiKey    = process.env.OPENAI_API_KEY
   const groqApiKey      = process.env.GROQ_API_KEY
@@ -499,9 +468,7 @@ async function analyzeContentWithDualEngine(
     try {
       const parsed = new URL(sourceAnalysis.source)
       reference = buildSourceSearchUrl(parsed.hostname.replace("www.", ""), searchQuery)
-    } catch {
-      reference = sourceAnalysis.source
-    }
+    } catch { reference = sourceAnalysis.source }
   }
   const bestFactCheck = factChecks.find((f: any) => f.source?.startsWith("http") && f.source !== "Source not identified")
   if (bestFactCheck) reference = bestFactCheck.source
@@ -510,7 +477,6 @@ async function analyzeContentWithDualEngine(
     sourceAnalysis, factChecks, clickbaitScore, credibilityPatterns, sentimentAnalysis, detectedTopics,
   })
 
-  // ── AI verdict ───────────────────────────────────────────────────────
   let verdict: "REAL" | "FAKE" | "UNVERIFIED" = "UNVERIFIED"
   let confidence = 50
   let explanation = ""
@@ -542,7 +508,6 @@ async function analyzeContentWithDualEngine(
     })
   }
 
-  // ── Build source links: article's OWN source first, then related ──────
   let analyzedDomain: string | null = null
   let ownSourceLink: SourceResult | null = null
 
@@ -550,20 +515,17 @@ async function analyzeContentWithDualEngine(
     try {
       const parsed = new URL(originalInput)
       analyzedDomain = parsed.hostname.replace("www.", "")
-
-      // Build a search-on-source link for the article's own outlet
       const matchedSrc = ALL_SOURCES.find(s => analyzedDomain!.includes(s.domain))
       const ownSearchUrl = buildSourceSearchUrl(analyzedDomain, searchQuery)
       ownSourceLink = {
         name: matchedSrc?.name ?? analyzedDomain,
         url: ownSearchUrl,
-        article_url: originalInput,   // direct link to the actual article
+        article_url: originalInput,
         search_url: ownSearchUrl,
         homepage_url: `https://${analyzedDomain}`,
       }
     } catch { /* ignore */ }
   } else if (type === "text" && sourceAnalysis.source) {
-    // For pasted text, if we identified a known source mention in text
     try {
       const parsed = new URL(sourceAnalysis.source)
       analyzedDomain = parsed.hostname.replace("www.", "")
@@ -581,20 +543,12 @@ async function analyzeContentWithDualEngine(
     } catch { /* ignore */ }
   }
 
-  // Fetch up to 2 *other* related sources (excluding the article's own domain)
   const relatedSources = await findRelatedTrustedSources(
-    searchQuery,
-    contentKeywords,
-    analyzedDomain,
-    gNewsApiKey,
-    googleSearchKey,
-    googleSearchCx,
-    newsApiKey,
-    detectedTopics,
-    isPhilippinesContent,
+    searchQuery, contentKeywords, analyzedDomain,
+    gNewsApiKey, googleSearchKey, googleSearchCx, newsApiKey,
+    detectedTopics, isPhilippinesContent,
   )
 
-  // Combine: own source first, then related (deduplicated by domain)
   const seenDomains = new Set<string>()
   const enrichedSourceLinks: SourceResult[] = []
 
@@ -616,7 +570,6 @@ async function analyzeContentWithDualEngine(
   const sourceCredibility   = await analyzeSourceCredibility(content, type, sourceAnalysis.credibility, verdict)
   const contentQuality      = await analyzeContentQuality(content, verdict, confidence)
 
-  // Adjust scores to align with verdict
   let adjustedSourceCred    = sourceCredibility.credibility_score
   let adjustedContentQuality = contentQuality.overall_score
   if (verdict === "REAL") {
@@ -657,6 +610,7 @@ async function analyzeContentWithDualEngine(
     content_keywords: contentKeywords,
     detected_topics: detectedTopics,
     analyzed_domain: analyzedDomain,
+    article_title: articleTitle,
   }
 }
 
@@ -671,7 +625,6 @@ function buildEvidenceContext(data: {
   const lines: string[] = []
   lines.push(`Source credibility: ${Math.round(data.sourceAnalysis.credibility * 100)}% — ${data.sourceAnalysis.label || "unknown source"}`)
   if (data.detectedTopics.length > 0) lines.push(`Detected topics: ${data.detectedTopics.join(", ")}`)
-  // Only include fact checks that are genuinely verified (not manual fallback)
   const validFactChecks = data.factChecks.filter((f: any) =>
     f.source !== "Source not identified" &&
     f.reviewer !== "Manual Verification Required" &&
@@ -954,7 +907,6 @@ async function generateFactChecksWithRealAPIs(content: string, claims: string[])
         }
       } catch (err) { console.error("[Google Fact Check] Error:", err) }
     }
-
     if (newsApiKey && results.length < 2) {
       try {
         const keywords = mainClaim.split(/\s+/).slice(0, 6).join(" ")
@@ -963,7 +915,6 @@ async function generateFactChecksWithRealAPIs(content: string, claims: string[])
         if (res.ok) {
           const data = await res.json()
           if (data.articles?.length) {
-            // Only add articles with meaningful relevance to the main claim
             const relevant = data.articles
               .map((a: any) => ({
                 claim: a.title,
@@ -975,9 +926,8 @@ async function generateFactChecksWithRealAPIs(content: string, claims: string[])
                 reviewer: a.source?.name || "News Source",
                 relevance: computeRelevance(mainClaim, a.title + " " + (a.description || "")),
               }))
-              .filter((a: any) => a.relevance > 0.08)  // only include if genuinely related
+              .filter((a: any) => a.relevance > 0.08)
               .sort((a: any, b: any) => b.relevance - a.relevance)
-
             results.push(...relevant.slice(0, 3))
           }
         }
@@ -985,12 +935,9 @@ async function generateFactChecksWithRealAPIs(content: string, claims: string[])
     }
   } catch (err) { console.error("[API] Fact check general error:", err) }
 
-  // ── KEY FIX: No hardcoded fallback source. Return empty array if nothing found.
-  // The UI handles the empty state gracefully.
   const sorted = results
     .filter(r => r.relevance > 0 || r.reviewer !== "Manual Verification Required")
     .sort((a, b) => b.relevance - a.relevance)
-
   factCheckCache.set(fcKey, sorted)
   return sorted
 }
@@ -1103,11 +1050,11 @@ async function analyzeContentQuality(content: string, verdict?: string, confiden
       result.grammar_issues = data.matches?.slice(0, 5) || []
     } catch {}
   }
-  const numbersCount     = (content.match(/\b\d{1,4}\b/g) || []).length
-  const dateMatches      = (content.match(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\b|\b\d{4}\b/g) || []).length
+  const numbersCount      = (content.match(/\b\d{1,4}\b/g) || []).length
+  const dateMatches       = (content.match(/\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\w*\b|\b\d{4}\b/g) || []).length
   const namedSourcesCount = [/according to/i, /reported by/i, /said/i, /source:/i, /\bvia\b/i].reduce((acc, p) => acc + (p.test(content) ? 1 : 0), 0)
   const namedEntitiesCount = (content.match(/\b[A-Z][a-z]+(?:\s+[A-Z][a-z]+){0,2}\b/g) || []).length
-  const specificityScore = Math.max(0, Math.min(1, Math.min(10, numbersCount) * 0.04 + Math.min(3, dateMatches) * 0.12 + Math.min(3, namedSourcesCount) * 0.25 + Math.min(6, namedEntitiesCount) * 0.02))
+  const specificityScore  = Math.max(0, Math.min(1, Math.min(10, numbersCount) * 0.04 + Math.min(3, dateMatches) * 0.12 + Math.min(3, namedSourcesCount) * 0.25 + Math.min(6, namedEntitiesCount) * 0.02))
   let specificity_label = "Unspecific"
   if (specificityScore > 0.75) specificity_label = "Highly specific"
   else if (specificityScore > 0.5) specificity_label = "Somewhat specific"
@@ -1123,10 +1070,10 @@ async function analyzeContentQuality(content: string, verdict?: string, confiden
   else if (verdict === "REAL") { result.overall_score = Math.max(0.7, evidenceScore); evidence_strength_label = "Strong" }
   else if (verdict === "UNVERIFIED") { result.overall_score = Math.max(0.4, Math.min(0.6, evidenceScore)); evidence_strength_label = evidence_strength_label === "Poor" ? "Weak" : evidence_strength_label }
   else { result.overall_score = evidenceScore }
-  result.specificity_label         = specificity_label
-  result.specificity_score         = specificityScore
-  result.evidence_strength_label   = evidence_strength_label
-  result.evidence_strength_score   = evidenceScore
+  result.specificity_label       = specificity_label
+  result.specificity_score       = specificityScore
+  result.evidence_strength_label = evidence_strength_label
+  result.evidence_strength_score = evidenceScore
   result.quality_label = result.overall_score > 0.75 ? "High Quality" : result.overall_score > 0.55 ? "Good" : result.overall_score > 0.4 ? "Low Quality" : "Poor"
   return result
 }

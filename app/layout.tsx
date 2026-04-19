@@ -12,8 +12,8 @@ export const metadata: Metadata = {
   description: "News Credibility Analyzer",
   generator: "v0.app",
   icons: {
-    icon: "/favicon.png",
-    shortcut: "favicon.png",
+    icon: "/clarifai-logo.png",
+    shortcut: "/clarifai-logo.png",
   },
 }
 

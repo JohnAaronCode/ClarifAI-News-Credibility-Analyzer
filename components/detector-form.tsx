@@ -194,7 +194,7 @@ export default function DetectorForm({ onAnalyze, onClearResult, loading }: Dete
 
       <div className="detector-form w-full">
         <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
-          <TabsList className="grid w-full grid-cols-2 mb-5 bg-slate-100 dark:bg-[#111] border border-slate-200 dark:border-white/[0.06] p-1 rounded-xl h-auto">
+          <TabsList className="grid w-full grid-cols-2 mb-5 bg-slate-100 dark:bg-[#111] border border-slate-200 dark:border-white/6 p-1 rounded-xl h-auto">
             <TabsTrigger
               value="article"
               className="flex items-center justify-center gap-2 py-2.5 text-sm font-medium rounded-lg data-[state=active]:bg-white dark:data-[state=active]:bg-[#1e1e22] data-[state=active]:text-slate-900 dark:data-[state=active]:text-white data-[state=active]:shadow-sm text-slate-500 dark:text-slate-400 transition-all"

@@ -20,7 +20,7 @@ interface EnsembleResult {
 async function callGemini(prompt: string, systemPrompt: string, apiKey: string): Promise<string | null> {
   const models = [
     "gemini-2.0-flash",
-    "gemini-1.5-flash",       // fallback model kung 429 ulit
+    "gemini-1.5-flash-latest",      
   ]
 
   for (const model of models) {
