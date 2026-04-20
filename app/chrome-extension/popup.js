@@ -1,4 +1,4 @@
-const DEFAULT_SERVER = "https://your-clarifai-app.vercel.app"
+const DEFAULT_SERVER = "https://clarif-ai-beta.vercel.app"
 let currentMode = "text"
 let serverUrl = DEFAULT_SERVER
 
